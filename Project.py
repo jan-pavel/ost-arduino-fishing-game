@@ -16,18 +16,21 @@ except ValueError:
     btn_start = Pin(2, Pin.IN)
     btn_reset = Pin(3, Pin.IN)
 
-# 2. LCD setup
+# 2. LED Setup
+try:
+    # Using "A1" as requested
+    pin_led = Pin("A1", Pin.OUT)
+except ValueError:
+    print("Pin A1 error: Trying generic GPIO 4...")
+    pin_led = Pin(4, Pin.OUT) 
+
+# 3. LCD setup
 HAS_LCD = False
 lcd = None
 try:
-    # Try to import the library provided
     from lcd_i2c import LCD
-    
-    # Initialize I2C (Port 1 is common, but might need Pin definitions on some boards)
     i2c_obj = I2C(1) 
-    
     LCD_ADDR = 0x27
-    # Note: Adjust parameters if your library expects a different order
     lcd = LCD(LCD_ADDR, 16, 2, i2c=i2c_obj)
     lcd.begin()
     lcd.print("Fishing Game") 
@@ -52,6 +55,11 @@ class FishingGame:
         self.last_lcd_update = 0
         self.lcd_interval = 200 
         
+        # LED Blink Timing (Non-blocking for Game Over)
+        self.led_blink_interval = 300 # Slower blink for Game Over
+        self.last_led_toggle = 0
+        self.led_state = 0
+        
         # Serial Input
         self.poll_obj = uselect.poll()
         self.poll_obj.register(sys.stdin, uselect.POLLIN)
@@ -64,6 +72,9 @@ class FishingGame:
         self.current_fish = -1
         self.game_start_ticks = 0
         self.fish_start_ticks = 0
+        
+        # Ensure LED is off in IDLE
+        pin_led.value(0)
         
         # Console Output
         print("\n" * 5)
@@ -107,17 +118,31 @@ class FishingGame:
         if fish_num == self.current_fish:
             self.score += 1
             print(f"*** CAUGHT fish {fish_num}! Score: {self.score}")
+            # Note: LED stays ON during catch, or we could briefly dip it.
+            # For now, we just move to next fish.
             self.spawn_new_fish()
         else:
             print(f"X Missed! Tried {fish_num}, fish at {self.current_fish}")
 
     def fish_timeout(self):
         print(f"!!! Too slow! Fish {self.current_fish} got away.")
+        
+        # --- FAILURE FEEDBACK ---
+        # Blink rapidly 3 times to show "Missed"
+        # Using sleep here is okay as it's a short penalty animation
+        for _ in range(3):
+            pin_led.value(0)
+            time.sleep(0.1)
+            pin_led.value(1)
+            time.sleep(0.1)
+            
         self.spawn_new_fish()
 
     def end_game(self):
         self.state = "GAME_OVER"
         self.current_fish = -1
+        
+        # LED Logic handles the blinking now, we just print info
         print("\n" + "="*30)
         print(f"TIME'S UP! Final Score: {self.score}")
         print("Press Button A3 (Reset) to play again.")
@@ -150,40 +175,47 @@ class FishingGame:
                 elif ch == 'r':
                     self.reset_game()
 
+    # --- LED LOGIC MANAGER ---
+    def handle_led_state(self):
+        """
+        1. PLAYING: LED Solid ON.
+        2. GAME_OVER: LED Blinking.
+        3. IDLE: LED Off.
+        """
+        if self.state == "PLAYING":
+            # While playing, LED is always ON (unless timeout blinks it)
+            pin_led.value(1)
+            
+        elif self.state == "GAME_OVER":
+            # Blink continuously without blocking buttons
+            now = time.ticks_ms()
+            if time.ticks_diff(now, self.last_led_toggle) > self.led_blink_interval:
+                self.led_state = not self.led_state
+                pin_led.value(self.led_state)
+                self.last_led_toggle = now
+                
+        else:
+            # IDLE state
+            pin_led.value(0)
+
     # --- LCD HELPER FUNCTIONS ---
     def update_lcd(self, line1, line2):
-        """
-        Safely updates the LCD if it exists.
-        Uses multiple checks to find the correct cursor movement method.
-        """
         if not HAS_LCD:
             return
-        
         try:
             lcd.clear()
             lcd.print(str(line1))
-            
-            # --- FIX FOR SECOND LINE ---
-            # Depending on the exact library version, the command changes.
-            # We try all common variations to ensure it works.
             if hasattr(lcd, 'move_to'):
-                lcd.move_to(0, 1)     # Standard for brainelectronics (Col, Row)
+                lcd.move_to(0, 1)
             elif hasattr(lcd, 'setCursor'):
-                lcd.setCursor(0, 1)   # Standard for Arduino-ports (Col, Row)
+                lcd.setCursor(0, 1)
             elif hasattr(lcd, 'set_cursor'):
-                lcd.set_cursor(0, 1)  # Common Snake_case variant
-            else:
-                # If no method found, we might be stuck on line 1. 
-                # Try printing enough spaces to wrap? (Not ideal but a fallback)
-                pass 
-            
+                lcd.set_cursor(0, 1)
             lcd.print(str(line2))
-            
         except Exception as e:
             print(f"LCD Write Error: {e}")
 
     def display_game_state(self):
-        """Calculates time and updates the screen during gameplay."""
         if self.state == "PLAYING":
             now = time.ticks_ms()
             
@@ -199,14 +231,18 @@ class FishingGame:
                 self.last_lcd_update = now
 
     def update(self):
+        # Always manage LED based on state
+        self.handle_led_state()
+        
         if self.state == "PLAYING":
             now = time.ticks_ms()
             
-            # Check Timers
+            # Check Global Game Timer
             if time.ticks_diff(now, self.game_start_ticks) > GAME_DURATION_MS:
                 self.end_game()
                 return
 
+            # Check Individual Fish Timer
             if time.ticks_diff(now, self.fish_start_ticks) > FISH_DURATION_MS:
                 self.fish_timeout()
                 
