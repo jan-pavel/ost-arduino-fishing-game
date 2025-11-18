@@ -1,199 +1,147 @@
-import curses
 import time
-import random
+import urandom # 'random' is usually 'urandom' in MicroPython
+import sys
+import uselect # For checking serial input without blocking
+from machine import Pin
+
+# --- Hardware Setup ---
+# Setup buttons on A2 and A3 as requested
+# Note: Depending on your specific Arduino board (Portenta, Nano RP2040), 
+# you might need to use the integer GPIO number (e.g., 26, 27) instead of "A2".
+try:
+    btn_start = Pin("A2", Pin.IN)
+    btn_reset = Pin("A3", Pin.IN)
+except ValueError:
+    # Fallback for generic boards if string names fail
+    print("Pin name error: Trying generic GPIO 2 and 3...")
+    btn_start = Pin(2, Pin.IN)
+    btn_reset = Pin(3, Pin.IN)
 
 # --- Game Configuration ---
-GAME_DURATION = 30  # 30 seconds total game time
-FISH_DURATION = 5   # 5 seconds to catch each fish
-NUM_FISH = 5        # 5 positions
+GAME_DURATION_MS = 30000  # 30 seconds
+FISH_DURATION_MS = 5000   # 5 seconds
+NUM_FISH = 5
 
 class FishingGame:
-    """
-    Manages the game state, logic, and rendering in the terminal.
-    """
-    def __init__(self, stdscr):
-        self.stdscr = stdscr
-        # --- Curses Setup ---
-        curses.curs_set(0)  # Hide the blinking cursor
-        self.stdscr.nodelay(True)  # Make getch() non-blocking
-        curses.start_color()
-        # Initialize color pairs (ID, foreground, background)
-        curses.init_pair(1, curses.COLOR_RED, curses.COLOR_BLACK)
-        curses.init_pair(2, curses.COLOR_GREEN, curses.COLOR_BLACK)
-        curses.init_pair(3, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-
+    def __init__(self):
         self.reset_game()
+        
+        # Button state tracking for edge detection
+        self.last_start_val = 0
+        self.last_reset_val = 0
+        
+        # Setup Serial Input (Non-blocking)
+        self.poll_obj = uselect.poll()
+        self.poll_obj.register(sys.stdin, uselect.POLLIN)
 
     def reset_game(self):
-        """Initializes or resets the game to the IDLE state."""
         self.state = "IDLE"
         self.score = 0
-        self.current_fish = -1  # No fish active (1-5)
-        self.game_start_time = 0
-        self.fish_start_time = 0
-        self.message = "Press 's' to start the game."
-        self.message_color = 0
+        self.current_fish = -1
+        self.game_start_ticks = 0
+        self.fish_start_ticks = 0
+        self.message = "Ready."
+        print("\n" * 5) # Clear space
+        print("--- MICROPYTHON FISHING ---")
+        print("Waiting... Press Button A2 (Start) to begin.")
 
     def start_game(self):
-        """Starts the 30-second game timer and spawns the first fish."""
         if self.state != "PLAYING":
             self.state = "PLAYING"
             self.score = 0
-            self.game_start_time = time.time()
-            self.message = "Game Started! Good luck!"
-            self.message_color = 2
+            self.game_start_ticks = time.ticks_ms()
+            print("\n!!! GAME STARTED !!!")
+            print("Type 1-5 in Serial Monitor to catch fish!")
             self.spawn_new_fish()
 
     def spawn_new_fish(self):
-        """Picks a new random fish and resets the 5-second timer."""
-        # Pick a new fish that is different from the current one
         old_fish = self.current_fish
         while self.current_fish == old_fish or self.current_fish == -1:
-            self.current_fish = random.randint(1, NUM_FISH)
+            self.current_fish = urandom.randint(1, NUM_FISH)
         
-        self.fish_start_time = time.time()
-        self.message = f"--> New fish at position {self.current_fish}!"
-        self.message_color = 3  # Yellow for new fish
+        self.fish_start_ticks = time.ticks_ms()
+        print(f"\n--> NEW FISH at Position [{self.current_fish}]")
+        print("    [1] [2] [3] [4] [5]")
+        # Create a simple visual arrow
+        arrow = "    " + "    " * (self.current_fish - 1) + "^^^"
+        print(arrow)
 
     def catch_fish(self, fish_num):
-        """Checks if the player's 'catch' (key press) is correct."""
         if self.state != "PLAYING":
-            self.message = "Press 's' to start first."
-            self.message_color = 1
             return
 
         if fish_num == self.current_fish:
-            # --- SUCCESS ---
             self.score += 1
-            self.message = f"*** CAUGHT! (Sensor {fish_num}) *** Score: {self.score}"
-            self.message_color = 2  # Green for success
+            print(f"*** CAUGHT fish {fish_num}! Score: {self.score}")
             self.spawn_new_fish()
         else:
-            # --- FAILED (Wrong fish) ---
-            self.message = f"-> Whoops! That's the wrong fish. Try for {self.current_fish}."
-            self.message_color = 1  # Red for error
+            print(f"X Missed! You tried {fish_num}, fish is at {self.current_fish}")
 
     def fish_timeout(self):
-        """Called when the 5-second fish timer expires."""
-        self.message = f"!!! Too slow for fish {self.current_fish}! (Blinks red)"
-        self.message_color = 1  # Red for error
+        print(f"!!! Too slow! Fish {self.current_fish} got away.")
         self.spawn_new_fish()
 
     def end_game(self):
-        """Called when the 30-second game timer expires."""
         self.state = "GAME_OVER"
-        self.current_fish = -1  # Turn off all fish
-        self.message = f"!!! TIME'S UP !!! Final Score: {self.score}"
-        self.message_color = 3
+        self.current_fish = -1
+        print("\n" + "="*30)
+        print(f"TIME'S UP! Final Score: {self.score}")
+        print("Press Button A3 (Reset) to play again.")
+        print("="*30 + "\n")
 
-    def handle_input(self, key):
-        """Processes user key presses."""
-        if key == ord('q'):
-            return False  # Signal to quit the game
-        elif key == ord('s'):
-            self.start_game()
-        elif key == ord('r'):
-            self.reset_game()
-        elif key in [ord(str(i)) for i in range(1, NUM_FISH + 1)]:
-            self.catch_fish(int(chr(key)))
+    def check_buttons(self):
+        # Invert logic? Usually 1 is pressed, unless using Pull-UP (then 0 is pressed)
+        # Adjust `== 1` to `== 0` if your buttons trigger when grounded.
+        curr_start = btn_start.value()
+        curr_reset = btn_reset.value()
+
+        # Edge Detection: Start (A2)
+        if curr_start == 1 and self.last_start_val == 0:
+            if self.state == "IDLE" or self.state == "GAME_OVER":
+                self.start_game()
         
-        return True  # Signal to continue
+        # Edge Detection: Reset (A3)
+        if curr_reset == 1 and self.last_reset_val == 0:
+            self.reset_game()
 
-    def update_state(self):
-        """Checks timers and updates game state accordingly."""
+        self.last_start_val = curr_start
+        self.last_reset_val = curr_reset
+
+    def check_serial_input(self):
+        """
+        Checks if user typed a number (1-5) into the Serial Monitor
+        """
+        # Check if characters are available in stdin
+        if self.poll_obj.poll(0):
+            ch = sys.stdin.read(1)
+            if ch:
+                if ch in '12345':
+                    self.catch_fish(int(ch))
+                elif ch == 's':
+                    if self.state == "IDLE": self.start_game()
+                elif ch == 'r':
+                    self.reset_game()
+
+    def update(self):
         if self.state == "PLAYING":
-            now = time.time()
-            # 1. Check if the main 30-second game timer is up
-            if now - self.game_start_time > GAME_DURATION:
+            now = time.ticks_ms()
+            
+            # Check Game Timer (30s)
+            if time.ticks_diff(now, self.game_start_ticks) > GAME_DURATION_MS:
                 self.end_game()
-            # 2. Check if the 5-second fish timer is up
-            elif now - self.fish_start_time > FISH_DURATION:
+                return
+
+            # Check Fish Timer (5s)
+            if time.ticks_diff(now, self.fish_start_ticks) > FISH_DURATION_MS:
                 self.fish_timeout()
 
-    def draw(self):
-        """Renders the game UI to the terminal screen."""
-        self.stdscr.clear()
-        
-        # --- Header ---
-        self.stdscr.addstr(0, 2, "--- Python Fishing Game Simulator ---")
-        self.stdscr.addstr(1, 2, "Controls: [s] Start | [r] Reset | [q] Quit")
-        
-        # --- Fish "Rectangle" ---
-        # Draw all 5 positions
-        self.stdscr.addstr(5, 5, "[1]")
-        self.stdscr.addstr(5, 15, "[2]")
-        self.stdscr.addstr(7, 10, "[5]")
-        self.stdscr.addstr(9, 5, "[3]")
-        self.stdscr.addstr(9, 15, "[4]")
-
-        # Highlight the active fish
-        if self.state == "PLAYING" and self.current_fish != -1:
-            positions = {
-                1: (5, 5, "[1]"), 2: (5, 15, "[2]"),
-                3: (9, 5, "[3]"), 4: (9, 15, "[4]"),
-                5: (7, 10, "[5]")
-            }
-            y, x, text = positions[self.current_fish]
-            # Draw the active fish in reverse (highlighted)
-            self.stdscr.addstr(y, x, text, curses.A_REVERSE)
-
-        # --- Game State UI ---
-        if self.state == "IDLE":
-            self.stdscr.addstr(4, 2, "Press 's' to start.")
-
-        elif self.state == "PLAYING":
-            # Calculate remaining times
-            game_time_left = max(0, GAME_DURATION - (time.time() - self.game_start_time))
-            fish_time_left = max(0, FISH_DURATION - (time.time() - self.fish_start_time))
-            
-            self.stdscr.addstr(12, 2, f"Game Time Left: {game_time_left:05.2f}s")
-            self.stdscr.addstr(13, 2, f"Fish Time Left: {fish_time_left:05.2f}s", 
-                               (curses.color_pair(1) if fish_time_left < 1.5 else 0))
-            self.stdscr.addstr(14, 2, f"Score: {self.score}", curses.A_BOLD)
-
-        elif self.state == "GAME_OVER":
-            self.stdscr.addstr(6, 2, "====================")
-            self.stdscr.addstr(7, 2, "!!! GAME OVER !!!")
-            self.stdscr.addstr(8, 2, f"Your Final Score: {self.score}", curses.A_BOLD)
-            self.stdscr.addstr(9, 2, "====================")
-            self.stdscr.addstr(11, 2, "Press 'r' to play again.")
-
-        # --- Status Message ---
-        # *** FIX IS HERE ***
-        # Wrap in try/except to prevent crashing if window is too small
-        try:
-            self.stdscr.addstr(16, 2, self.message, curses.color_pair(self.message_color))
-        except curses.error:
-            # This fails if the window is too small. We can safely ignore it.
-            pass
-        
-        self.stdscr.refresh()
-
-    def run(self):
-        """The main game loop."""
+    def loop(self):
         while True:
-            # 1. Handle user input
-            key = self.stdscr.getch()
-            if not self.handle_input(key):
-                break  # Quit loop
-            
-            # 2. Update game state (check timers)
-            self.update_state()
-            
-            # 3. Draw the current state to the screen
-            self.draw()
-            
-            # 4. Sleep to prevent 100% CPU usage
-            time.sleep(0.05)  # ~20 frames per second
+            self.check_buttons()
+            self.check_serial_input()
+            self.update()
+            time.sleep(0.05) # Small delay to save CPU
 
-
-def main(stdscr):
-    """
-    Wrapper function to safely run the curses application.
-    """
-    game = FishingGame(stdscr)
-    game.run()
-
-if __name__ == "__main__":
-    # curses.wrapper handles all terminal setup and cleanup
-    curses.wrapper(main)
+# --- Run ---
+game = FishingGame()
+game.loop()
