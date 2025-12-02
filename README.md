@@ -41,7 +41,7 @@ The system consists of two wireless modules:
 
 ### Software
 - **Firmware:** MicroPython (flashed on both ESP32 boards).
-- **IDE:** Thonny IDE or VS Code (with Pymakr extension).
+- **IDE:** Arduino Lab for MicroPython
 - **Libraries:**
     - `tm1637.py` (For 7-segment displays).
     - `espnow`, `network`, `machine` (Built-in MicroPython libraries).
