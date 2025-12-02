@@ -2,11 +2,12 @@ import time
 import urandom
 import sys
 import uselect
-from machine import Pin, I2C, ADC
+from machine import Pin
 from time import ticks_diff, ticks_ms
+import tm1637
 
 # ==========================================
-# 1. TIMER CLASS
+# 1. TIMER CLASS (unchanged)
 # ==========================================
 class Timer:
     def __init__(self, duration_ms=None, one_shot=True):
@@ -46,7 +47,7 @@ class Timer:
     @property
     def elapsed_ms(self):
         if self._start_time is None:
-            return 0 # Return 0 if not started yet to prevent errors
+            return 0 
         return ticks_diff(ticks_ms(), self._start_time)
     
     @property
@@ -64,53 +65,48 @@ class Timer:
             if self._one_shot:
                 self.stop()
             else:
-                self.start() # Restart for repeating timers
+                self.start() 
 
 # ==========================================
 # 2. HARDWARE SETUP
 # ==========================================
 
 # --- Buttons ---
+# Using internal Pull-Ups. Pressed = 0 (LOW), Released = 1 (HIGH)
 try:
-    btn_start = Pin("A2", Pin.IN)
-    btn_reset = Pin("A3", Pin.IN)
-except ValueError:
-    print("Pin name error: Trying generic GPIO 2 and 3...")
-    btn_start = Pin(2, Pin.IN)
-    btn_reset = Pin(3, Pin.IN)
-
-# --- LED ---
-try:
-    pin_led = Pin("D8", Pin.OUT)
-except ValueError:
-    print("Pin D8 error: Trying generic GPIO 4...")
-    pin_led = Pin(4, Pin.OUT) 
-
-# --- Hall Sensor ---
-try:
-    # Using A0 (GPIO 1 on Arduino Nano ESP32)
-    hall_sensor = ADC(Pin(1)) 
-    hall_sensor.atten(ADC.ATTN_11DB) # Full range: 3.3v
-    print("Hall Sensor Initialized on Pin A0/1")
+    btn_start = Pin("A0", Pin.IN, Pin.PULL_UP)
+    btn_reset = Pin("A1", Pin.IN, Pin.PULL_UP)
 except Exception as e:
-    print(f"Hall Sensor Error: {e}")
-    hall_sensor = None
+    print(f"Button Setup Error: {e}")
 
-# --- LCD ---
-HAS_LCD = False
-lcd = None
+# --- TM1637 Displays ---
 try:
-    from lcd_i2c import LCD
-    i2c_obj = I2C(1) 
-    LCD_ADDR = 0x20
-    lcd = LCD(LCD_ADDR, 16, 2, i2c=i2c_obj)
-    lcd.begin()
-    lcd.print("Fishing Game") 
-    HAS_LCD = True
-    print("LCD Found and Initialized.")
+    # Display 1: TIME (CLK=D2, DIO=D3)
+    display_time = tm1637.TM1637(clk=Pin("D2"), dio=Pin("D3"))
+    # Display 2: SCORE (CLK=D4, DIO=D5)
+    display_score = tm1637.TM1637(clk=Pin("D4"), dio=Pin("D5"))
+    
+    # Set brightness (0-7)
+    display_time.brightness(2)
+    display_score.brightness(2)
 except Exception as e:
-    print(f"LCD Error (Running without screen): {e}")
-    HAS_LCD = False
+    print(f"Display Setup Error: {e}")
+
+# --- Hall Sensors (Digital Inputs) ---
+# Mapping Fish 1-5 to your specific pins
+# Fish 1: A2, Fish 2: SCL, Fish 3: A6, Fish 4: D6, Fish 5: RX
+sensor_pins = ["A2", "SCL", "A6", "D6", "RX"]
+hall_sensors = []
+
+for pin_name in sensor_pins:
+    try:
+        # Input Only. Assuming external modules handle the pull-up/down, 
+        # or we rely on the module outputting 0v/3.3v strongly.
+        hall_sensors.append(Pin(pin_name, Pin.IN))
+    except Exception as e:
+        print(f"Error setting up sensor on {pin_name}: {e}")
+
+print(f"Sensors initialized: {len(hall_sensors)}")
 
 # ==========================================
 # 3. GAME CONFIGURATION
@@ -118,7 +114,6 @@ except Exception as e:
 GAME_DURATION_MS = 30000  # 30 seconds
 FISH_DURATION_MS = 5000   # 5 seconds
 NUM_FISH = 5
-HALL_THRESHOLD = 28000 
 
 # ==========================================
 # 4. GAME CLASS
@@ -128,35 +123,29 @@ class FishingGame:
         # Game State
         self.state = "IDLE"
         self.score = 0
-        self.current_fish = -1
+        self.current_fish = -1 # 0 to 4 (Indices of hall_sensors list)
         
-        # Button Debouncing (Keeping manual logic for Buttons is usually better/simpler)
-        self.last_start_val = 0
-        self.last_reset_val = 0
+        # Button State Logic
+        self.last_start_val = 1
+        self.last_reset_val = 1
         
-        # Sensor Tracking
+        # Sensor Logic
         self.sensor_triggered = False 
 
-        # --- INITIALIZE TIMERS ---
-        
-        # 1. Main Game Timer (30s, One Shot)
+        # --- TIMERS ---
+        # 1. Main Game Timer (30s)
         self.game_timer = Timer(GAME_DURATION_MS, one_shot=True)
         self.game_timer.on_timer_end = self.end_game
 
-        # 2. Fish Patience Timer (5s, One Shot)
+        # 2. Fish Patience Timer (5s)
         self.fish_timer = Timer(FISH_DURATION_MS, one_shot=True)
         self.fish_timer.on_timer_end = self.fish_timeout
 
-        # 3. LCD Update Timer (200ms, Repeating)
-        self.lcd_timer = Timer(200, one_shot=False)
-        self.lcd_timer.on_timer_end = self.refresh_display
+        # 3. Display Update Timer (100ms - smooth updates)
+        self.display_timer = Timer(100, one_shot=False)
+        self.display_timer.on_timer_end = self.update_displays
 
-        # 4. LED Blink Timer (300ms, Repeating - used in Game Over)
-        self.led_timer = Timer(300, one_shot=False)
-        self.led_timer.on_timer_end = self.toggle_led_state
-        self.led_state = 0
-
-        # Serial Input
+        # Serial Input Setup
         self.poll_obj = uselect.poll()
         self.poll_obj.register(sys.stdin, uselect.POLLIN)
         
@@ -167,18 +156,19 @@ class FishingGame:
         self.score = 0
         self.current_fish = -1
         
-        # Stop all timers
+        # Stop timers
         self.game_timer.stop()
         self.fish_timer.stop()
-        self.lcd_timer.stop()
-        self.led_timer.stop()
-        
-        pin_led.value(0)
+        self.display_timer.stop()
         
         print("\n" * 5)
         print("--- MICROPYTHON FISHING ---")
-        print("Waiting... Press Button A2 (Start) to begin.")
-        self.update_lcd("FISHING GAME", "Press Start")
+        print("Press Button A0 to Start.")
+        
+        # Reset Displays
+        # Show "00:00" on time and "0000" on score
+        display_time.numbers(0, 0, colon=True)
+        display_score.show("0000")
 
     def start_game(self):
         if self.state != "PLAYING":
@@ -186,173 +176,148 @@ class FishingGame:
             self.score = 0
             
             print("\n!!! GAME STARTED !!!")
-            print("Use the MAGNET to catch the fish!")
             
             # Start Timers
             self.game_timer.start()
-            self.lcd_timer.start()
+            self.display_timer.start()
+            
+            # Update score immediately
+            display_score.number(self.score)
             
             self.spawn_new_fish()
-            self.update_lcd("GO! Catch Fish!", f"Score: {self.score}")
 
     def spawn_new_fish(self):
         old_fish = self.current_fish
-        while self.current_fish == old_fish or self.current_fish == -1:
-            self.current_fish = urandom.randint(1, NUM_FISH)
         
-        # Reset/Start the fish timer for this new fish
+        # Pick a random fish index (0 to 4)
+        while self.current_fish == old_fish or self.current_fish == -1:
+            self.current_fish = urandom.randint(0, NUM_FISH - 1)
+        
+        # Reset fish timer
         self.fish_timer.start()
         
-        print(f"\n--> NEW FISH at Position [{self.current_fish}]")
-        arrow = "    " + "    " * (self.current_fish - 1) + "^^^"
-        print("    [1] [2] [3] [4] [5]")
-        print(arrow)
+        # Reset trigger lock (so we can catch the new fish)
+        self.sensor_triggered = False
         
-        # Force an immediate LCD update
-        self.refresh_display()
+        print(f"\n--> Catch Fish #{self.current_fish + 1} (Pin {sensor_pins[self.current_fish]})")
 
-    def catch_fish(self, fish_num):
+    def catch_fish(self):
         if self.state != "PLAYING":
             return
 
-        if fish_num == self.current_fish:
-            self.score += 1
-            print(f"*** CAUGHT fish {fish_num}! Score: {self.score}")
-            
-            # Stop the fish timer immediately so it doesn't timeout while we blink
-            self.fish_timer.stop()
-            
-            # Little victory blink (Blocking is okay for short effect)
-            pin_led.value(0)
-            time.sleep(0.1)
-            pin_led.value(1)
-            
-            self.spawn_new_fish()
-        else:
-            print(f"X Missed! Tried {fish_num}, fish at {self.current_fish}")
+        self.score += 1
+        print(f"*** CAUGHT! Score: {self.score}")
+        
+        # Update Score Display Immediately
+        display_score.number(self.score)
+        
+        # Stop fish timer so it doesn't timeout
+        self.fish_timer.stop()
+        
+        self.spawn_new_fish()
 
     def fish_timeout(self):
-        # This function is called automatically by self.fish_timer
-        print(f"!!! Too slow! Fish {self.current_fish} got away.")
-        
-        # Failure Blink
-        for _ in range(3):
-            pin_led.value(0)
-            time.sleep(0.1)
-            pin_led.value(1)
-            time.sleep(0.1)
-            
+        print(f"!!! Too slow! Fish #{self.current_fish + 1} got away.")
         self.spawn_new_fish()
 
     def end_game(self):
-        # This function is called automatically by self.game_timer
         self.state = "GAME_OVER"
         self.current_fish = -1
         
-        # Stop game logic timers
+        # Stop timers
         self.fish_timer.stop()
-        self.lcd_timer.stop()
+        self.display_timer.stop()
         
-        # Start the blink timer for Game Over effect
-        self.led_timer.start()
+        print("\n=== TIME'S UP ===")
+        print(f"Final Score: {self.score}")
+        print("Press Button A1 to Reset.")
         
-        print("\n" + "="*30)
-        print(f"TIME'S UP! Final Score: {self.score}")
-        print("Press Button A3 (Reset) to play again.")
-        print("="*30 + "\n")
-        self.update_lcd("GAME OVER", f"Final Score: {self.score}")
+        # Show final Time "00:00" and Final Score
+        display_time.numbers(0, 0, colon=True)
+        display_score.show("End ")
+        time.sleep(1)
+        display_score.number(self.score)
 
-    def refresh_display(self):
-        # Called automatically by self.lcd_timer every 200ms
+    def update_displays(self):
+        # Called every 100ms by display_timer
         if self.state == "PLAYING":
-            # Calculate remaining time using the timer property
+            # Calculate remaining seconds
             elapsed = self.game_timer.elapsed_ms
             time_left_ms = GAME_DURATION_MS - elapsed
             time_left_sec = max(0, time_left_ms // 1000)
             
-            self.update_lcd(f"Time: {time_left_sec}s", f"Score: {self.score}")
-            
-            # Keep LED on during play
-            pin_led.value(1)
+            # Show Minutes:Seconds (though here it's just 00:Seconds)
+            display_time.numbers(0, time_left_sec, colon=True)
 
-    def toggle_led_state(self):
-        # Called automatically by self.led_timer during GAME_OVER
-        if self.state == "GAME_OVER":
-            self.led_state = not self.led_state
-            pin_led.value(self.led_state)
-        else:
-            self.led_timer.stop() # Safety stop
-
-    # --- Hardware Handling ---
+    # --- Hardware Input Handling ---
 
     def check_buttons(self):
+        # Read Buttons (Active LOW)
         curr_start = btn_start.value()
         curr_reset = btn_reset.value()
 
-        if curr_start == 1 and self.last_start_val == 0:
+        # Check Start (Pressing logic: Transition from 1 to 0)
+        if curr_start == 0 and self.last_start_val == 1:
             if self.state == "IDLE" or self.state == "GAME_OVER":
                 self.start_game()
         
-        if curr_reset == 1 and self.last_reset_val == 0:
+        # Check Reset
+        if curr_reset == 0 and self.last_reset_val == 1:
             self.reset_game()
 
         self.last_start_val = curr_start
         self.last_reset_val = curr_reset
 
-    def check_hall_sensor(self):
-        if self.state != "PLAYING" or hall_sensor is None:
+    def check_active_sensor(self):
+        if self.state != "PLAYING" or self.current_fish == -1:
             return
 
-        # Read analog value (0 - 65535)
-        val = hall_sensor.read_u16()
+        # We only check the sensor for the CURRENT active fish
+        # This prevents cheating by holding magnets on other sensors
+        active_sensor_pin = hall_sensors[self.current_fish]
         
-        is_magnet_near = (val < HALL_THRESHOLD)
+        # Read Value
+        sensor_val = active_sensor_pin.value()
+        
+        # LOGIC: Most Hall sensors go LOW (0) when magnet is near.
+        # If your sensors go HIGH (1) when magnet is near, change to: if sensor_val == 1:
+        is_magnet_near = (sensor_val == 0)
 
         if is_magnet_near and not self.sensor_triggered:
             self.sensor_triggered = True
-            self.catch_fish(self.current_fish)
-            
+            self.catch_fish()
         elif not is_magnet_near:
+            # Magnet removed, ready for next catch (if it was the same fish, but logic usually changes fish)
             self.sensor_triggered = False
 
     def check_serial_input(self):
+        # Keep keyboard input for debugging!
         if self.poll_obj.poll(0):
             ch = sys.stdin.read(1)
             if ch:
                 if ch in '12345':
-                    self.catch_fish(int(ch))
+                    # Simulate catch for specific fish index
+                    idx = int(ch) - 1
+                    if idx == self.current_fish:
+                        self.catch_fish()
                 elif ch == 's':
                     if self.state == "IDLE": self.start_game()
                 elif ch == 'r':
                     self.reset_game()
 
-    def update_lcd(self, line1, line2):
-        if not HAS_LCD:
-            return
-        try:
-            lcd.clear()
-            lcd.print(str(line1))
-            if hasattr(lcd, 'move_to'): lcd.move_to(0, 1)
-            elif hasattr(lcd, 'setCursor'): lcd.setCursor(0, 1)
-            elif hasattr(lcd, 'set_cursor'): lcd.set_cursor(0, 1)
-            lcd.print(str(line2))
-        except Exception as e:
-            print(f"LCD Write Error: {e}")
-
     def loop(self):
         while True:
-            # 1. Check Hardware Inputs
+            # 1. Inputs
             self.check_buttons()
+            self.check_active_sensor()
             self.check_serial_input()
-            self.check_hall_sensor()
             
-            # 2. Update Timers (Logic is now inside the Timer classes)
+            # 2. Timers
             self.game_timer.update()
             self.fish_timer.update()
-            self.lcd_timer.update()
-            self.led_timer.update()
+            self.display_timer.update()
             
-            # 3. Small sleep to save CPU
+            # 3. Small sleep
             time.sleep(0.01)
 
 # --- Run ---
