@@ -83,14 +83,14 @@ To build this project you will need:
 
 **Assembly Gallery**
 
-| Setup View | Top View |
+| **Frame** | **Fishing Rod** |
 |:---:|:---:|
 |![](https://github.com/user-attachments/assets/cab7fb00-d752-40bb-a2ca-9ee4bc7d474d)|![](https://github.com/user-attachments/assets/d98c50ea-c9f9-47c0-9ff9-ec52a3003abb)|
-| **Controller Wiring** | **Rod & Sensors** |
+| **Hall Sensors** | **Test using LED Screen** |
 | ![](https://github.com/user-attachments/assets/ec0eaaac-d24b-4d43-8bc0-26b105b974b1) | ![](https://github.com/user-attachments/assets/60d49ae4-be34-4491-993e-fa241ed03fab) |
-| **Display Detail** | **Sensor Placement** |
+| **Frame Assembly** | **Frame Assembly** |
 | ![](https://github.com/user-attachments/assets/8cbbc3c8-decd-4ae0-ac48-51aade653cca) | ![](https://github.com/user-attachments/assets/b5dccd6a-18ec-4cea-b089-f9c24615d4c2) |
-| **Case Construction** | **Full Assembly** |
+| **Prototyping** | **LED and Hall Sensor Testing** |
 | ![](https://github.com/user-attachments/assets/2444f242-15e3-441a-82ce-62df6c2d9df8) | ![](https://github.com/user-attachments/assets/5ce6d02a-b686-4760-b4b9-f6500258a70d) |
 
 ### Uploading the code
