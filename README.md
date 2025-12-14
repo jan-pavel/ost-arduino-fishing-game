@@ -1,6 +1,9 @@
 # OST Arduino Fishing Game
 It is a standalone, wireless interactive fishing game powered by MicroPython and ESP-NOW. It creates a physical "arcade-style" gaming experience that eliminates the need for a computer connection during gameplay by running logic directly on the microcontrollers.
 
+To advertise our game we produced this product video. Enjoy!
+Product video: https://vimeo.com/1146381605?share=copy&fl=sv&fe=ci
+
 The system consists of two wireless modules:
 1.  **The Game Controller (Sender):** Handles the game logic, displays time/score, reads hall sensors (magnets), and reads buttons.
 2.  **The Light Board (Receiver):** Receives wireless commands via ESP-NOW to light up specific LEDs corresponding to the fish.
