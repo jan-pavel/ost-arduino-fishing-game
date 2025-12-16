@@ -118,3 +118,6 @@ To build this project you will need:
 
 ### Feedback and questions
 If you are interested in this project and need to ask questions, feel free to get in touch with us!
+Jan: https://www.linkedin.com/in/jan-pavel/
+Viivi: https://www.linkedin.com/in/viivi-heller-315bb91b4/
+Yeshe: www.linkedin.com/in/yeshe-tsultrim
